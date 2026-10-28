@@ -89,8 +89,11 @@ export default Plugin.define({
     const zones = () =>
       settings?.zones && settings.zones.length ? settings.zones : [currentTz];
 
-    const [open, setOpen] = createSignal(true);
-    const [calendarOpen, setCalendarOpen] = createSignal(true);
+    // Configurable via cli.json/opencode.json plugin options; collapsed unless
+    // explicitly expanded with { "collapsedByDefault": false }.
+    const collapsedByDefault = context.options?.collapsedByDefault !== false;
+    const [open, setOpen] = createSignal(!collapsedByDefault);
+    const [calendarOpen, setCalendarOpen] = createSignal(!collapsedByDefault);
 
     async function configure() {
       for (;;) {

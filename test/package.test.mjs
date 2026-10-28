@@ -122,6 +122,21 @@ test("two supported mouse-down handlers remain", async () => {
   assert.ok(!attributes.includes("onClick"));
 });
 
+test("clocks and calendar start collapsed unless the option opts out", async () => {
+  const compiled = await readFile("dist/tui.js", "utf8");
+  assert.match(
+    compiled,
+    /context\.options\?\.collapsedByDefault\s*!==\s*false/,
+    "the collapsed default must be driven by the plugin option",
+  );
+  // Neither signal may keep the old hard-coded expanded default.
+  assert.doesNotMatch(
+    compiled,
+    /createSignal\(true\)/,
+    "clocks and calendar must not default to expanded",
+  );
+});
+
 test("scripts-disabled archive contains only compiled package files", async () => {
   const directory = await mkdtemp(join(tmpdir(), "timezone-clocks-package-"));
   try {
