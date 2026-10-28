@@ -79,12 +79,24 @@ test("signed original, synthetic trap and corrected Git packages exercise real e
       "e157cdcff9ecefd3d8b7c780d09f3b5bc834531f90783589d5de648e135abbbb",
       "Original source fingerprint must match upstream acbbdfb",
     );
-    // Formatting and removal of precisely two duplicate unsupported props are the only source edits.
+    // Formatting and removal of precisely two duplicate unsupported props are the
+    // only packaging edits. The collapsed-by-default feature is a separate,
+    // deliberate source change and is applied here explicitly so this guard still
+    // catches every other accidental drift.
     const originalSource = show("baseline", "src/tui.tsx");
-    const supported = originalSource.replace(
-      / onClick=\{\(e: any\) => \{ try \{ e\?\.stopPropagation\?\.\(\) \} catch \{\}; set(?:Calendar)?Open\(!(?:calendarOpen|open)\(\)\) \}\}/g,
-      "",
-    );
+    const supported = originalSource
+      .replace(
+        / onClick=\{\(e: any\) => \{ try \{ e\?\.stopPropagation\?\.\(\) \} catch \{\}; set(?:Calendar)?Open\(!(?:calendarOpen|open)\(\)\) \}\}/g,
+        "",
+      )
+      .replace(
+        / {4}const \[open, setOpen\] = createSignal\(true\)\n {4}const \[calendarOpen, setCalendarOpen\] = createSignal\(true\)/,
+        `    // Configurable via cli.json/opencode.json plugin options; collapsed unless
+    // explicitly expanded with { "collapsedByDefault": false }.
+    const collapsedByDefault = context.options?.collapsedByDefault !== false;
+    const [open, setOpen] = createSignal(!collapsedByDefault);
+    const [calendarOpen, setCalendarOpen] = createSignal(!collapsedByDefault);`,
+      );
     assert.equal(
       await prettier.format(supported, { parser: "typescript" }),
       await readFile("src/tui.tsx", "utf8"),

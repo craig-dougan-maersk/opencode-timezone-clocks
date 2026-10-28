@@ -5,6 +5,27 @@ The `./tui` export is committed JavaScript in `dist/tui.js`. Solid JSX is compil
 with Babel's universal transform targeting `@opentui/solid`; host runtime imports
 remain external. React is not needed or bundled.
 
+## Collapsed by default
+
+The clocks section and its calendar start collapsed, so the sidebar stays quiet
+until you open them. Click the section header to expand or collapse it.
+
+Set `collapsedByDefault` to `false` in the plugin options to start expanded
+instead:
+
+```jsonc title="cli.json"
+{
+  "plugins": [
+    {
+      "package": "craig-dougan-maersk/opencode-timezone-clocks",
+      "options": { "collapsedByDefault": true }
+    }
+  ]
+}
+```
+
+Absent or `true` keeps the collapsed default.
+
 ## Development
 
 Use Node 26 and npm 11 (matching verification), then:
