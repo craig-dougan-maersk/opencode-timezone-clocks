@@ -137,6 +137,47 @@ test("clocks and calendar start collapsed unless the option opts out", async () 
   );
 });
 
+test("clock rows align into fixed columns and colour each time", async () => {
+  const compiled = await readFile("dist/tui.js", "utf8");
+  assert.match(
+    compiled,
+    /return value \+ " "\.repeat\(width - value\.length\)/,
+    "columns must be padded to a fixed width so times line up",
+  );
+  assert.match(
+    compiled,
+    /theme\?\.categorical/,
+    "each clock must take its colour from the theme categorical palette",
+  );
+  assert.match(
+    compiled,
+    /"dark" \? 400 : 600/,
+    "the palette step must adapt to the theme mode",
+  );
+});
+
+test("custom timezones, offsets and labels are configurable", async () => {
+  const compiled = await readFile("dist/tui.js", "utf8");
+  assert.match(
+    compiled,
+    /timezone-clocks\.json/,
+    "clocks must persist to the documented config file",
+  );
+  assert.match(compiled, /writeFileSync\(file, JSON\.stringify\(/);
+  for (const action of [
+    "Add IANA timezone",
+    "Add UTC-offset zone",
+    "Rename a clock",
+  ]) {
+    assert.ok(compiled.includes(action), `dialog must offer: ${action}`);
+  }
+  assert.match(
+    compiled,
+    /timeZone: id/,
+    "an added IANA timezone must be validated before it is stored",
+  );
+});
+
 test("scripts-disabled archive contains only compiled package files", async () => {
   const directory = await mkdtemp(join(tmpdir(), "timezone-clocks-package-"));
   try {

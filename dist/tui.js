@@ -62,12 +62,76 @@ const ZONES = [{
   city: "Auckland",
   code: "NZST"
 }];
-function zoneInfo(id) {
-  return ZONES.find(z => z.id === id) || {
-    id,
-    city: id,
-    code: id
-  };
+const CONFIG_FILE = "timezone-clocks.json";
+// Sidebar columns stay fixed width so every clock's time lines up vertically.
+const LABEL_MIN = 5;
+const LABEL_MAX = 14;
+const CODE_MIN = 2;
+const CODE_MAX = 8;
+function currentTimeZone() {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+}
+function preset(id) {
+  return ZONES.find(z => z.id === id);
+}
+function defaultLabel(id) {
+  const known = preset(id);
+  if (known) return known.city;
+  const tail = id.split("/").pop() || id;
+  return tail.replace(/_/g, " ");
+}
+function zoneLabel(zone) {
+  const custom = typeof zone.label === "string" ? zone.label.trim() : "";
+  return custom || defaultLabel(zone.id);
+}
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+// Pads (or truncates with an ellipsis) to an exact width so columns align.
+function pad(value, width) {
+  if (width <= 0) return "";
+  if (value.length > width) {
+    return width === 1 ? "…" : value.slice(0, width - 1) + "…";
+  }
+  return value + " ".repeat(width - value.length);
+}
+function validIana(id) {
+  try {
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: id
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Accepts 7, +7, -3, 5:30, +05:30, UTC+07:00; returns minutes east of UTC.
+function parseOffset(input) {
+  const cleaned = input.trim().replace(/^(?:UTC|GMT)\s*/i, "");
+  if (!cleaned) return null;
+  const match = /^([+-])?\s*(\d{1,2})(?::?(\d{2}))?$/.exec(cleaned);
+  if (!match) return null;
+  const hours = Number(match[2]);
+  const minutes = Number(match[3] ?? "0");
+  if (hours > 14 || minutes > 59) return null;
+  const total = (match[1] === "-" ? -1 : 1) * (hours * 60 + minutes);
+  return total < -720 || total > 840 ? null : total;
+}
+function offsetId(offset) {
+  const sign = offset < 0 ? "-" : "+";
+  const abs = Math.abs(offset);
+  const hh = String(Math.floor(abs / 60)).padStart(2, "0");
+  const mm = String(abs % 60).padStart(2, "0");
+  return `UTC${sign}${hh}:${mm}`;
+}
+function offsetLabelText(offset) {
+  const sign = offset < 0 ? "-" : "+";
+  const abs = Math.abs(offset);
+  const hh = Math.floor(abs / 60);
+  const mm = abs % 60;
+  return mm ? `UTC${sign}${hh}:${String(mm).padStart(2, "0")}` : `UTC${sign}${hh}`;
 }
 function formatTime(tz, now) {
   try {
@@ -82,6 +146,16 @@ function formatTime(tz, now) {
     return "--:--:--";
   }
 }
+function formatOffsetTime(offset, now) {
+  const shifted = new Date(now + offset * 60000);
+  const hh = String(shifted.getUTCHours()).padStart(2, "0");
+  const mm = String(shifted.getUTCMinutes()).padStart(2, "0");
+  const ss = String(shifted.getUTCSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
+function zoneTime(zone, now) {
+  return typeof zone.offset === "number" ? formatOffsetTime(zone.offset, now) : formatTime(zone.id, now);
+}
 function tzCode(tz, now) {
   try {
     const parts = new Intl.DateTimeFormat("en-US", {
@@ -92,6 +166,52 @@ function tzCode(tz, now) {
   } catch {
     return tz;
   }
+}
+function zoneCode(zone, now) {
+  if (typeof zone.offset === "number") return offsetLabelText(zone.offset);
+  const known = preset(zone.id);
+  if (known) return known.code;
+  return tzCode(zone.id, now);
+}
+
+// A distinct theme colour per clock; the palette is guaranteed non-empty.
+function zoneColour(index, theme, mode) {
+  const fallback = theme?.text?.base;
+  const palette = theme?.categorical;
+  if (!Array.isArray(palette) || !palette.length) return fallback;
+  const scale = palette[index % palette.length];
+  const step = mode === "dark" ? 400 : 600;
+  return scale?.[step] ?? scale?.[500] ?? fallback;
+}
+function normaliseZones(raw) {
+  if (!Array.isArray(raw)) return null;
+  const zones = [];
+  for (const entry of raw) {
+    if (typeof entry === "string") {
+      if (validIana(entry)) zones.push({
+        id: entry
+      });
+      continue;
+    }
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry;
+    const id = typeof record.id === "string" ? record.id.trim() : "";
+    const label = typeof record.label === "string" ? record.label : undefined;
+    if (typeof record.offset === "number" && Number.isFinite(record.offset)) {
+      const offset = Math.round(record.offset);
+      zones.push({
+        id: id || offsetId(offset),
+        offset,
+        label
+      });
+      continue;
+    }
+    if (id && validIana(id)) zones.push({
+      id,
+      label
+    });
+  }
+  return zones.length ? zones : null;
 }
 function calendarData(now) {
   const d = new Date(now);
@@ -131,46 +251,229 @@ function calendarData(now) {
 }
 export default Plugin.define({
   id: "timezone.clocks",
-  setup(context) {
-    const currentTz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-    const [now, setNow] = createSignal(Date.now());
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    const [settings, updateSettings] = context.storage.store("settings", {
+  async setup(context) {
+    const local = currentTimeZone();
+
+    // Retained only to migrate the previous string[] selection into the JSON file.
+    const [legacy] = context.storage.store("settings", {
       initial: {
-        zones: [currentTz]
+        zones: [local]
       }
     });
-    const zones = () => settings?.zones && settings.zones.length ? settings.zones : [currentTz];
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const dir = `${os.homedir()}/.config/opencode`;
+    const file = `${dir}/${CONFIG_FILE}`;
+    function readConfig() {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+        const zones = normaliseZones(parsed?.zones);
+        return zones ? {
+          version: 1,
+          zones
+        } : null;
+      } catch {
+        return null;
+      }
+    }
+    function writeConfig(config) {
+      try {
+        fs.mkdirSync(dir, {
+          recursive: true
+        });
+        fs.writeFileSync(file, JSON.stringify(config, null, 2) + "\n");
+      } catch {}
+    }
+    let initial = readConfig();
+    if (!initial) {
+      const migrated = normaliseZones(legacy?.zones);
+      initial = {
+        version: 1,
+        zones: migrated ?? [{
+          id: local
+        }]
+      };
+      writeConfig(initial);
+    }
+    const [config, setConfig] = createSignal(initial);
+    const [now, setNow] = createSignal(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    async function persist(zones) {
+      const next = {
+        version: 1,
+        zones
+      };
+      setConfig(next);
+      writeConfig(next);
+    }
 
     // Configurable via cli.json/opencode.json plugin options; collapsed unless
     // explicitly expanded with { "collapsedByDefault": false }.
     const collapsedByDefault = context.options?.collapsedByDefault !== false;
     const [open, setOpen] = createSignal(!collapsedByDefault);
     const [calendarOpen, setCalendarOpen] = createSignal(!collapsedByDefault);
+
+    // Returns null when the prompt was cancelled, otherwise the trimmed text
+    // (empty means "keep the default label").
+    async function askLabel(defaultText, currentText) {
+      const label = await context.ui.dialog.prompt({
+        title: "Label",
+        description: `Shown in the sidebar (blank keeps "${defaultText}")`,
+        value: currentText ?? "",
+        placeholder: defaultText
+      });
+      return label === undefined ? null : label.trim();
+    }
+    async function addIana() {
+      const id = await context.ui.dialog.prompt({
+        title: "IANA timezone",
+        description: "e.g. Europe/Amsterdam, America/Sao_Paulo",
+        placeholder: "Continent/City"
+      });
+      if (id === undefined) return;
+      const trimmed = id.trim();
+      if (!trimmed) return;
+      if (!validIana(trimmed)) {
+        await context.ui.dialog.alert({
+          title: "Unrecognised timezone",
+          message: `"${trimmed}" is not a valid IANA timezone name.`
+        });
+        return;
+      }
+      if (config().zones.some(z => z.id === trimmed)) {
+        await context.ui.dialog.alert({
+          title: "Already configured",
+          message: `${trimmed} is already in the clocks list.`
+        });
+        return;
+      }
+      const label = await askLabel(defaultLabel(trimmed));
+      if (label === null) return;
+      await persist([...config().zones, {
+        id: trimmed,
+        label: label || undefined
+      }]);
+    }
+    async function addOffset() {
+      const raw = await context.ui.dialog.prompt({
+        title: "UTC offset",
+        description: "e.g. 7, +5:30, -3, UTC+07:00",
+        placeholder: "+5:30"
+      });
+      if (raw === undefined) return;
+      const offset = parseOffset(raw);
+      if (offset === null) {
+        await context.ui.dialog.alert({
+          title: "Unrecognised offset",
+          message: `"${raw.trim()}" is not a UTC offset between -12:00 and +14:00.`
+        });
+        return;
+      }
+      const label = await askLabel(offsetLabelText(offset));
+      if (label === null) return;
+      await persist([...config().zones, {
+        id: offsetId(offset),
+        offset,
+        label: label || undefined
+      }]);
+    }
+    async function rename() {
+      const zones = config().zones;
+      const choice = await context.ui.dialog.select({
+        title: "Rename which clock?",
+        options: zones.map((zone, index) => ({
+          title: `${zoneLabel(zone)} · ${zoneCode(zone, Date.now())}`,
+          value: String(index)
+        }))
+      });
+      if (choice === undefined) return;
+      const index = Number(choice);
+      const zone = zones[index];
+      if (!zone) return;
+      const label = await askLabel(defaultLabel(zone.id), zone.label);
+      if (label === null) return;
+      await persist(zones.map((z, idx) => idx === index ? {
+        ...z,
+        label: label || undefined
+      } : z));
+    }
+    async function reset() {
+      const confirmed = await context.ui.dialog.confirm({
+        title: "Reset clocks",
+        message: "Replace the clock list with this machine's local timezone?",
+        label: {
+          confirm: "Reset",
+          cancel: "Cancel"
+        }
+      });
+      if (!confirmed) return;
+      await persist([{
+        id: local
+      }]);
+    }
     async function configure() {
       for (;;) {
-        const selected = new Set(zones());
-        const opts = ZONES.map(z => ({
-          title: `${selected.has(z.id) ? "✓ " : "  "}${z.city} (${z.code})`,
-          value: z.id
-        }));
-        if (!ZONES.find(z => z.id === currentTz)) {
-          opts.unshift({
-            title: `${selected.has(currentTz) ? "✓ " : "  "}${currentTz} (local)`,
-            value: currentTz
-          });
-        }
+        const zones = config().zones;
+        const active = new Set(zones.map(z => z.id));
+        const options = [...zones.map((zone, index) => ({
+          title: `✓ ${zoneLabel(zone)} · ${zoneCode(zone, Date.now())}`,
+          value: `off:${index}`
+        })), ...ZONES.filter(p => !active.has(p.id)).map(p => ({
+          title: `  ${p.city} · ${p.code}`,
+          value: `on:${p.id}`
+        })), {
+          title: "＋ Add IANA timezone…",
+          value: "add-iana"
+        }, {
+          title: "＋ Add UTC-offset zone…",
+          value: "add-offset"
+        }, {
+          title: "✎ Rename a clock…",
+          value: "rename"
+        }, {
+          title: "↺ Reset to local time",
+          value: "reset"
+        }];
         const choice = await context.ui.dialog.select({
-          title: "Toggle timezone (Esc to finish)",
-          options: opts
+          title: "Timezone clocks (Esc to finish)",
+          options
         });
-        if (!choice) return;
-        const next = new Set(selected);
-        if (next.has(choice)) next.delete(choice);else next.add(choice);
-        if (next.size === 0) next.add(currentTz);
-        await updateSettings(draft => {
-          draft.zones = Array.from(next);
-        });
+        if (choice === undefined) return;
+        if (choice === "add-iana") {
+          await addIana();
+          continue;
+        }
+        if (choice === "add-offset") {
+          await addOffset();
+          continue;
+        }
+        if (choice === "rename") {
+          await rename();
+          continue;
+        }
+        if (choice === "reset") {
+          await reset();
+          continue;
+        }
+        if (choice.startsWith("on:")) {
+          await persist([...config().zones, {
+            id: choice.slice(3)
+          }]);
+          continue;
+        }
+        if (choice.startsWith("off:")) {
+          const current = config().zones;
+          if (current.length <= 1) {
+            await context.ui.dialog.alert({
+              title: "At least one clock",
+              message: "Add another clock before removing the last one."
+            });
+            continue;
+          }
+          const index = Number(choice.slice(4));
+          await persist(current.filter((_, idx) => idx !== index));
+          continue;
+        }
       }
     }
     context.ui.slot({
@@ -204,21 +507,47 @@ export default Plugin.define({
               var _el$4 = _$createElement("box");
               _$setProp(_el$4, "flexDirection", "column");
               _$setProp(_el$4, "paddingLeft", 1);
-              _$insert(_el$4, _$createComponent(For, {
-                get each() {
-                  return zones();
-                },
-                children: tz => {
-                  const info = zoneInfo(tz);
-                  const code = tzCode(tz, nowVal);
-                  return (() => {
-                    var _el$8 = _$createElement("text");
-                    _$insert(_el$8, () => `${info.city} (${code}): ${formatTime(tz, nowVal)}`);
-                    _$effect(_$p => _$setProp(_el$8, "fg", ctx.theme.text.base, _$p));
+              _$insert(_el$4, () => {
+                const rows = config().zones.map(zone => ({
+                  zone,
+                  label: zoneLabel(zone),
+                  code: zoneCode(zone, nowVal)
+                }));
+                const labelWidth = clamp(rows.reduce((max, row) => Math.max(max, row.label.length), 0), LABEL_MIN, LABEL_MAX);
+                const codeWidth = clamp(rows.reduce((max, row) => Math.max(max, row.code.length), 0), CODE_MIN, CODE_MAX);
+                return _$createComponent(For, {
+                  each: rows,
+                  children: (row, index) => (() => {
+                    var _el$8 = _$createElement("box"),
+                      _el$9 = _$createElement("text"),
+                      _el$0 = _$createElement("text"),
+                      _el$1 = _$createElement("text");
+                    _$insertNode(_el$8, _el$9);
+                    _$insertNode(_el$8, _el$0);
+                    _$insertNode(_el$8, _el$1);
+                    _$setProp(_el$8, "flexDirection", "row");
+                    _$setProp(_el$9, "width", labelWidth + 1);
+                    _$insert(_el$9, () => pad(row.label, labelWidth) + " ");
+                    _$setProp(_el$0, "width", codeWidth + 1);
+                    _$insert(_el$0, () => pad(row.code, codeWidth) + " ");
+                    _$insert(_el$1, () => zoneTime(row.zone, nowVal));
+                    _$effect(_p$ => {
+                      var _v$5 = ctx.theme.text.base,
+                        _v$6 = ctx.theme.text.muted,
+                        _v$7 = zoneColour(index(), ctx.theme, ctx.themeMode);
+                      _v$5 !== _p$.e && (_p$.e = _$setProp(_el$9, "fg", _v$5, _p$.e));
+                      _v$6 !== _p$.t && (_p$.t = _$setProp(_el$0, "fg", _v$6, _p$.t));
+                      _v$7 !== _p$.a && (_p$.a = _$setProp(_el$1, "fg", _v$7, _p$.a));
+                      return _p$;
+                    }, {
+                      e: undefined,
+                      t: undefined,
+                      a: undefined
+                    });
                     return _el$8;
-                  })();
-                }
-              }));
+                  })()
+                });
+              });
               return _el$4;
             }
           }), _el$5);
@@ -242,60 +571,60 @@ export default Plugin.define({
               _$insert(_el$7, () => {
                 const cal = calendarData(nowVal);
                 return (() => {
-                  var _el$9 = _$createElement("box"),
-                    _el$0 = _$createElement("text"),
-                    _el$1 = _$createElement("text"),
-                    _el$11 = _$createElement("text");
-                  _$insertNode(_el$9, _el$0);
-                  _$insertNode(_el$9, _el$1);
-                  _$insertNode(_el$9, _el$11);
-                  _$setProp(_el$9, "flexDirection", "column");
-                  _$insert(_el$0, () => `${cal.monthName} ${cal.year}`);
-                  _$insertNode(_el$1, _$createTextNode(`Su Mo Tu We Th Fr Sa`));
-                  _$insert(_el$9, _$createComponent(For, {
+                  var _el$10 = _$createElement("box"),
+                    _el$11 = _$createElement("text"),
+                    _el$12 = _$createElement("text"),
+                    _el$14 = _$createElement("text");
+                  _$insertNode(_el$10, _el$11);
+                  _$insertNode(_el$10, _el$12);
+                  _$insertNode(_el$10, _el$14);
+                  _$setProp(_el$10, "flexDirection", "column");
+                  _$insert(_el$11, () => `${cal.monthName} ${cal.year}`);
+                  _$insertNode(_el$12, _$createTextNode(`Su Mo Tu We Th Fr Sa`));
+                  _$insert(_el$10, _$createComponent(For, {
                     get each() {
                       return cal.rows;
                     },
                     children: week => (() => {
-                      var _el$12 = _$createElement("box");
-                      _$setProp(_el$12, "flexDirection", "row");
-                      _$insert(_el$12, _$createComponent(For, {
+                      var _el$15 = _$createElement("box");
+                      _$setProp(_el$15, "flexDirection", "row");
+                      _$insert(_el$15, _$createComponent(For, {
                         each: week,
                         children: day => (() => {
-                          var _el$13 = _$createElement("text");
-                          _$setProp(_el$13, "width", 3);
-                          _$insert(_el$13, () => day ? String(day).padStart(2, " ") + " " : "   ");
+                          var _el$16 = _$createElement("text");
+                          _$setProp(_el$16, "width", 3);
+                          _$insert(_el$16, () => day ? String(day).padStart(2, " ") + " " : "   ");
                           _$effect(_p$ => {
-                            var _v$8 = day === cal.date ? ctx.theme.text.success : ctx.theme.text.muted,
-                              _v$9 = day === cal.date ? TextAttributes.BOLD : 0;
-                            _v$8 !== _p$.e && (_p$.e = _$setProp(_el$13, "fg", _v$8, _p$.e));
-                            _v$9 !== _p$.t && (_p$.t = _$setProp(_el$13, "attributes", _v$9, _p$.t));
+                            var _v$1 = day === cal.date ? ctx.theme.text.success : ctx.theme.text.muted,
+                              _v$10 = day === cal.date ? TextAttributes.BOLD : 0;
+                            _v$1 !== _p$.e && (_p$.e = _$setProp(_el$16, "fg", _v$1, _p$.e));
+                            _v$10 !== _p$.t && (_p$.t = _$setProp(_el$16, "attributes", _v$10, _p$.t));
                             return _p$;
                           }, {
                             e: undefined,
                             t: undefined
                           });
-                          return _el$13;
+                          return _el$16;
                         })()
                       }));
-                      return _el$12;
+                      return _el$15;
                     })()
-                  }), _el$11);
-                  _$insert(_el$11, () => `${cal.dow}, ${cal.monthName} ${cal.date}, ${cal.year}`);
+                  }), _el$14);
+                  _$insert(_el$14, () => `${cal.dow}, ${cal.monthName} ${cal.date}, ${cal.year}`);
                   _$effect(_p$ => {
-                    var _v$5 = ctx.theme.text.base,
-                      _v$6 = ctx.theme.text.muted,
-                      _v$7 = ctx.theme.text.muted;
-                    _v$5 !== _p$.e && (_p$.e = _$setProp(_el$0, "fg", _v$5, _p$.e));
-                    _v$6 !== _p$.t && (_p$.t = _$setProp(_el$1, "fg", _v$6, _p$.t));
-                    _v$7 !== _p$.a && (_p$.a = _$setProp(_el$11, "fg", _v$7, _p$.a));
+                    var _v$8 = ctx.theme.text.base,
+                      _v$9 = ctx.theme.text.muted,
+                      _v$0 = ctx.theme.text.muted;
+                    _v$8 !== _p$.e && (_p$.e = _$setProp(_el$11, "fg", _v$8, _p$.e));
+                    _v$9 !== _p$.t && (_p$.t = _$setProp(_el$12, "fg", _v$9, _p$.t));
+                    _v$0 !== _p$.a && (_p$.a = _$setProp(_el$14, "fg", _v$0, _p$.a));
                     return _p$;
                   }, {
                     e: undefined,
                     t: undefined,
                     a: undefined
                   });
-                  return _el$9;
+                  return _el$10;
                 })();
               });
               return _el$7;
