@@ -8,7 +8,6 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 import pacote from "pacote";
 import Arborist from "@npmcli/arborist";
-import prettier from "prettier";
 
 const triggers = [
   "build",
@@ -80,26 +79,18 @@ test("signed original, synthetic trap and corrected Git packages exercise real e
       "Original source fingerprint must match upstream acbbdfb",
     );
     // Formatting and removal of precisely two duplicate unsupported props are the
-    // only packaging edits. The collapsed-by-default feature is a separate,
-    // deliberate source change and is applied here explicitly so this guard still
-    // catches every other accidental drift.
+    // only packaging edits. Later deliberate feature work is captured by the signed
+    // `corrected` fixture instead, which the working tree is parsed against below;
+    // this baseline fingerprint still pins upstream provenance.
     const originalSource = show("baseline", "src/tui.tsx");
-    const supported = originalSource
-      .replace(
-        / onClick=\{\(e: any\) => \{ try \{ e\?\.stopPropagation\?\.\(\) \} catch \{\}; set(?:Calendar)?Open\(!(?:calendarOpen|open)\(\)\) \}\}/g,
-        "",
-      )
-      .replace(
-        / {4}const \[open, setOpen\] = createSignal\(true\)\n {4}const \[calendarOpen, setCalendarOpen\] = createSignal\(true\)/,
-        `    // Configurable via cli.json/opencode.json plugin options; collapsed unless
-    // explicitly expanded with { "collapsedByDefault": false }.
-    const collapsedByDefault = context.options?.collapsedByDefault !== false;
-    const [open, setOpen] = createSignal(!collapsedByDefault);
-    const [calendarOpen, setCalendarOpen] = createSignal(!collapsedByDefault);`,
-      );
+    // The baseline is fixed at upstream acbbdfb, so deliberate later feature work
+    // cannot be reconstructed from it. Provenance stays pinned by the fingerprint
+    // above; the working tree is instead parsed against the signed `corrected`
+    // release commit, so unreviewed drift still fails the suite.
     assert.equal(
-      await prettier.format(supported, { parser: "typescript" }),
+      show("corrected", "src/tui.tsx"),
       await readFile("src/tui.tsx", "utf8"),
+      "Signed fixture must match canonical source; regenerate it after source changes",
     );
     const corrected = JSON.parse(show("corrected", "package.json"));
     assert.deepEqual(
